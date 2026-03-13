@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+google-genai
+pypdf
+python-docx
+langchain
+langchain-google-genai
+langchain-community
+python-dotenv
+bcrypt
+email-validator
+a2wsgi
+passlib[bcrypt]
+python-jose[cryptography]
+sqlalchemy
+supabase==2.15.0

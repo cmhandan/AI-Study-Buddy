@@ -1,0 +1,5 @@
+{
+  "name": "AI Study Buddy",
+  "description": "A smart learning assistant that turns your documents into interactive study sessions with summaries, chatbots, and quizzes using Gemini AI.",
+  "requestFramePermissions": []
+}
