@@ -80,6 +80,24 @@ class ChangePasswordRequest(BaseModel):
 
 class ChangeRoleRequest(BaseModel):
     status: str
+
+class ChangeStatusRequest(BaseModel):
+    account_status: str
+
+class DocumentCreate(BaseModel):
+    title: str
+    content: str
+    docId: str
+    summary: str | None = None
+
+class QuizResultCreate(BaseModel):
+    docId: str
+    docTitle: str
+    score: int
+    totalQuestions: int
+
+class StudySessionCreate(BaseModel):
+    durationMinutes: int
 # ─────────────────────────────────────────────────────────────────────────────
 
 from google import genai
@@ -107,7 +125,7 @@ app.add_middleware(
 
 api_key = os.environ.get("API_KEY")
 
-MODEL_NAME = 'gemini-2.5-flash'  # You can change this to a different model if desired
+MODEL_NAME = 'gemini-2.0-flash'  # Using flash model for better reliability
 
 llm = None
 direct_model = None
@@ -117,7 +135,7 @@ print(f"Debug: API_KEY present: {bool(api_key)}")
 if api_key:
     try:
         print("Debug: Initializing Google GenAI client...")
-        client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+        client = genai.Client(api_key=api_key)
         direct_model = client.models.generate_content
         print("Debug: GenAI client initialized")
         
@@ -137,6 +155,8 @@ if not os.path.exists(STORAGE_DIR):
     os.makedirs(STORAGE_DIR)
 class SummaryRequest(BaseModel):
     text: str
+    length: str = "medium"
+    doc_title: str = ""
 
 class QuizRequest(BaseModel):
     text: str
@@ -150,6 +170,9 @@ class ChatRequest(BaseModel):
     message: str
     docId: str
     history: List[ChatMessage]
+
+class ParaphraseRequest(BaseModel):
+    text: str
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     text = ""
@@ -255,10 +278,14 @@ def login(req: LoginRequest):
 def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
+@app.get("/api/auth/verify")
+def verify_token(current_user: dict = Depends(get_current_user)):
+    return {"valid": True, "user_id": current_user["id"]}
+
 # ── Admin Routes ──────────────────────────────────────────────────────────────
 @app.get("/api/admin/users")
 def admin_list_users(admin: dict = Depends(get_current_admin)):
-    result = supabase_client.table("users").select("id, name, email, status, created_at").execute()
+    result = supabase_client.table("users").select("id, name, email, status, account_status, created_at").execute()
     return result.data or []
 
 @app.delete("/api/admin/users/{user_id}")
@@ -290,13 +317,59 @@ def admin_change_role(user_id: str, req: ChangeRoleRequest, admin: dict = Depend
     if not result.data:
         raise HTTPException(status_code=404, detail="User not found.")
     return {"message": f"User role updated to {req.status}."}
+
+@app.put("/api/admin/users/{user_id}/status")
+def admin_toggle_user_status(user_id: str, req: ChangeStatusRequest, admin: dict = Depends(get_current_admin)):
+    if req.account_status not in ("active", "inactive"):
+        raise HTTPException(status_code=400, detail="account_status must be 'active' or 'inactive'.")
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="You cannot change your own account status.")
+    result = supabase_client.table("users").update({"account_status": req.account_status}).eq("id", user_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"message": f"User account status updated to {req.account_status}."}
+
+@app.get("/api/admin/users/{user_id}/details")
+def admin_get_user_details(user_id: str, admin: dict = Depends(get_current_admin)):
+    user_result = supabase_client.table("users").select("*").eq("id", user_id).execute()
+    if not user_result.data:
+        raise HTTPException(status_code=404, detail="User not found.")
+    
+    user = user_result.data[0]
+    
+    docs_result = supabase_client.table("documents").select("id, title, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
+    quizzes_result = supabase_client.table("quiz_results").select("id, score, total_questions, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
+    
+    activities = []
+    for doc in docs_result.data or []:
+        activities.append({
+            "action": f"Uploaded document: {doc['title']}",
+            "timestamp": doc["created_at"]
+        })
+    for quiz in quizzes_result.data or []:
+        activities.append({
+            "action": f"Completed quiz: {quiz['score']}/{quiz['total_questions']} correct",
+            "timestamp": quiz["created_at"]
+        })
+    activities.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return {
+        "user": user,
+        "documents": docs_result.data or [],
+        "quiz_results": quizzes_result.data or [],
+        "recent_activity": activities[:20]
+    }
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     filename = file.filename
     extension = filename.split(".")[-1].lower() if "." in filename else ""
     content = ""
+    
+    image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tiff", "heic"]
+    if extension in image_extensions:
+        raise HTTPException(status_code=400, detail="Image files are not supported. Please upload a PDF, DOCX, or TXT file.")
     
     file_bytes = await file.read()
     
@@ -310,37 +383,234 @@ async def upload_document(file: UploadFile = File(...)):
         except:
             content = file_bytes.decode("latin-1")
     else:
-        raise HTTPException(status_code=400, detail="Unsupported file format.")
+        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a PDF, DOCX, DOC, or TXT file.")
 
     if not content.strip():
          raise HTTPException(status_code=400, detail="The document appears to be empty.")
 
     doc_id = process_and_store_document(content)
+    
+    # Save to database
+    db_doc_id = str(uuid.uuid4())
+    new_doc = {
+        "id": db_doc_id,
+        "user_id": current_user["id"],
+        "title": filename,
+        "content": content,
+        "doc_id": doc_id,
+        "summary": None,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    try:
+        supabase_client.table("documents").insert(new_doc).execute()
+    except Exception as e:
+        print(f"Error saving document: {e}")
 
     return {
         "title": filename,
         "content": content,
-        "docId": doc_id
+        "docId": doc_id,
+        "id": db_doc_id
+    }
+
+# ── User Documents ───────────────────────────────────────────────────────────
+@app.post("/api/documents")
+async def create_document(doc: DocumentCreate, current_user: dict = Depends(get_current_user)):
+    doc_id = str(uuid.uuid4())
+    new_doc = {
+        "id": doc_id,
+        "user_id": current_user["id"],
+        "title": doc.title,
+        "content": doc.content,
+        "doc_id": doc.docId,
+        "summary": doc.summary,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    result = supabase_client.table("documents").insert(new_doc).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to save document.")
+    return new_doc
+
+@app.get("/api/documents")
+async def get_documents(current_user: dict = Depends(get_current_user)):
+    result = supabase_client.table("documents").select("*").eq("user_id", current_user["id"]).order("created_at", desc=True).execute()
+    return result.data or []
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, current_user: dict = Depends(get_current_user)):
+    result = supabase_client.table("documents").delete().eq("id", doc_id).eq("user_id", current_user["id"]).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return {"message": "Document deleted successfully."}
+
+@app.put("/api/documents/{doc_id}/summary")
+async def update_document_summary(doc_id: str, request: SummaryRequest, current_user: dict = Depends(get_current_user)):
+    result = supabase_client.table("documents").update({"summary": request.text}).eq("id", doc_id).eq("user_id", current_user["id"]).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return {"message": "Summary updated successfully."}
+
+# ── Quiz Results ─────────────────────────────────────────────────────────────
+@app.post("/api/quiz-results")
+async def create_quiz_result(quiz_result: QuizResultCreate, current_user: dict = Depends(get_current_user)):
+    result_id = str(uuid.uuid4())
+    new_result = {
+        "id": result_id,
+        "user_id": current_user["id"],
+        "doc_id": quiz_result.docId,
+        "doc_title": quiz_result.docTitle,
+        "score": quiz_result.score,
+        "total_questions": quiz_result.totalQuestions,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    result = supabase_client.table("quiz_results").insert(new_result).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to save quiz result.")
+    return new_result
+
+@app.get("/api/quiz-results")
+async def get_quiz_results(current_user: dict = Depends(get_current_user)):
+    result = supabase_client.table("quiz_results").select("*").eq("user_id", current_user["id"]).order("created_at", desc=True).execute()
+    return result.data or []
+
+# ── Study Sessions ──────────────────────────────────────────────────────────
+@app.post("/api/study-sessions")
+async def create_study_session(session: StudySessionCreate, current_user: dict = Depends(get_current_user)):
+    session_id = str(uuid.uuid4())
+    new_session = {
+        "id": session_id,
+        "user_id": current_user["id"],
+        "duration_minutes": session.durationMinutes,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    result = supabase_client.table("study_sessions").insert(new_session).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to save study session.")
+    return new_session
+
+@app.get("/api/study-sessions")
+async def get_study_sessions(current_user: dict = Depends(get_current_user)):
+    result = supabase_client.table("study_sessions").select("*").eq("user_id", current_user["id"]).order("created_at", desc=True).execute()
+    return result.data or []
+
+@app.get("/api/dashboard-stats")
+async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
+    # Get document count
+    docs_result = supabase_client.table("documents").select("id", count="exact").eq("user_id", current_user["id"]).execute()
+    doc_count = docs_result.count if docs_result.count is not None else 0
+    
+    # Get quiz results
+    quiz_result = supabase_client.table("quiz_results").select("*").eq("user_id", current_user["id"]).execute()
+    quiz_results = quiz_result.data or []
+    quiz_count = len(quiz_results)
+    
+    # Calculate average score
+    avg_score = 0
+    if quiz_count > 0:
+        total_percentage = sum((q["score"] / q["total_questions"]) * 100 for q in quiz_results)
+        avg_score = round(total_percentage / quiz_count)
+    
+    # Get study time
+    sessions_result = supabase_client.table("study_sessions").select("duration_minutes").eq("user_id", current_user["id"]).execute()
+    sessions = sessions_result.data or []
+    total_study_minutes = sum(s["duration_minutes"] for s in sessions)
+    
+    # Get recent quiz results (last 5)
+    recent_quizzes = quiz_results[:5]
+    
+    # Get recent documents
+    docs_list = supabase_client.table("documents").select("id, title, created_at").eq("user_id", current_user["id"]).order("created_at", desc=True).limit(4).execute()
+    recent_docs = docs_list.data or []
+    
+    return {
+        "documentCount": doc_count,
+        "quizCount": quiz_count,
+        "averageScore": avg_score,
+        "studyHours": round(total_study_minutes / 60, 1),
+        "recentQuizzes": recent_quizzes,
+        "recentDocuments": recent_docs
     }
 
 @app.post("/api/summary")
 async def generate_summary(request: SummaryRequest):
     if not direct_model:
         raise HTTPException(status_code=500, detail="Server misconfigured: GenAI client not initialized (Missing API Key?).")
-        
+    
+    if not request.text or len(request.text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Document content is too short to summarize.")
+    
+    doc_title = request.doc_title or "the document"
+    text_content = request.text
+    
+    if request.length == "short":
+        prompt = f"""Based on the following document titled "{doc_title}", provide exactly 3 brief key points.
+
+DOCUMENT CONTENT:
+{text_content[:3000]}
+
+TASK: Extract and list exactly 3 main takeaways from this document. Write each point in 1-2 lines using your own words.
+
+OUTPUT (3 bullet points only):"""
+        max_tokens = 400
+        temp = 0.3
+    elif request.length == "long":
+        prompt = f"""Create a comprehensive summary of the document titled "{doc_title}".
+
+DOCUMENT CONTENT:
+{text_content}
+
+TASK: Write a detailed summary that includes:
+1. A brief introduction (2 sentences)
+2. All major topics and concepts covered (8-12 points with explanations)
+3. Key definitions and terminology
+4. Important examples or details
+5. A conclusion
+
+Be thorough and ensure your response covers the main ideas from the document. Use your own words, do not copy text directly.
+
+OUTPUT:"""
+        max_tokens = 4000
+        temp = 0.4
+    else:
+        prompt = f"""Summarize the document titled "{doc_title}" in a balanced format.
+
+DOCUMENT CONTENT:
+{text_content[:6000]}
+
+TASK: Create a summary with:
+1. Brief overview (1-2 sentences)
+2. 5-6 main points with clear explanations
+3. Key terms and definitions (at least 3)
+4. Main takeaway
+
+Use your own words and ensure the summary is informative but concise.
+
+OUTPUT:"""
+        max_tokens = 1500
+        temp = 0.35
+    
     try:
-        prompt = f"Please provide a concise but comprehensive summary of the following study material. Use bullet points for key concepts:\n\n{request.text}"
         response = direct_model(
             model=MODEL_NAME,
             contents=prompt,
             config={
-                "max_output_tokens": 1000
+                "max_output_tokens": max_tokens,
+                "temperature": temp,
+                "system_instruction": "You are a helpful study assistant. Always provide accurate, relevant summaries based ONLY on the document content provided. Never make up information not in the document."
             }
         )
-        return {"summary": response.text}
-    except Exception as e:
-        print(f"Summary Generation Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        summary_text = response.text.strip()
+        if not summary_text:
+            raise Exception("Empty response from AI")
+        return {"summary": summary_text}
+    except HTTPException:
+        raise
+    except Exception as api_error:
+        error_str = str(api_error)
+        if "image" in error_str.lower():
+            raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
+        print(f"Summary Generation Error: {api_error}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(api_error)}")
 
 @app.post("/api/quiz")
 async def generate_quiz(request: QuizRequest):
@@ -356,14 +626,20 @@ async def generate_quiz(request: QuizRequest):
         
         prompt = f"{system_instruction}\n\nGenerate a multiple-choice quiz with {request.num_questions} questions based on the following text:\n\n{request.text}"
         
-        response = direct_model(
-            model=MODEL_NAME,
-            contents=prompt,
-            config={
-                "max_output_tokens": 2000,
-                "temperature": 0.2
-            }
-        )
+        try:
+            response = direct_model(
+                model=MODEL_NAME,
+                contents=prompt,
+                config={
+                    "max_output_tokens": 2000,
+                    "temperature": 0.2
+                }
+            )
+        except Exception as api_error:
+            error_str = str(api_error)
+            if "image" in error_str.lower():
+                raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
+            raise
         
         text = response.text.strip()
         if text.startswith("```"):
@@ -388,6 +664,8 @@ async def generate_quiz(request: QuizRequest):
             raise ValueError("AI did not return a list of questions.")
             
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Quiz Generation Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate quiz. Check backend logs.")
@@ -413,23 +691,58 @@ async def chat_response(request: ChatRequest):
     try:
         chunks = document_chunks[request.docId]
         context_docs = [Document(page_content=chunk) for chunk in chunks]
-
-        prompt = ChatPromptTemplate.from_template("""
-        You are an AI Study Buddy. Answer the user's question based ONLY on the following context.
-        If the answer is not in the context, say you don't know based on the provided document.
         
-        <context>
-        {context}
-        </context>
+        user_message = request.message.lower().strip()
+        
+        # Handle greetings
+        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', "what's up", 'wassup']
+        if any(g == user_message or user_message.startswith(g + ' ') or user_message.startswith(g + ',') for g in greetings):
+            return {"text": "Hello! I'm your study assistant. Feel free to ask me any questions about the document you're reading, and I'll help you understand the content better."}
+        
+        # Handle thank you messages
+        thanks = ['thank you', 'thanks', 'thank you so much', 'thanks a lot', 'appreciate it', 'thx']
+        if any(t in user_message for t in thanks):
+            return {"text": "You're welcome! I'm happy to help. Feel free to ask more questions if you need anything else."}
+        
+        # Handle goodbye messages
+        goodbye = ['bye', 'goodbye', 'see you', 'talk to you later', 'thanks for helping']
+        if any(g in user_message for g in goodbye):
+            return {"text": "Goodbye! Good luck with your studies. Feel free to come back anytime if you need help!"}
+        
+        # Build the prompt - with paraphrasing, no verbatim copying, and polite fallbacks
+        prompt_text = """You are a helpful AI Study Assistant. Your role is to help students understand their study materials better.
 
-        Question: {input}
-        """)
+CRITICAL RULES - Follow these strictly:
+1. PARAPHRASE EVERYTHING: Never copy text verbatim from the document. Always rephrase and explain in your own words while maintaining accuracy.
+2. Be conversational and friendly, like a helpful tutor.
+3. When information is in the document: Explain it clearly in your own words with examples or analogies when helpful.
+4. When information is NOT in the document: Politely say "I couldn't find information about that in your document. However, based on general knowledge..." and then provide a helpful answer. Do not apologize excessively or make the user feel bad for asking.
+5. Use bullet points or numbered lists when presenting multiple points.
+6. Keep answers focused but informative.
+{rephrase_instruction}
 
+Document Context:
+{context}
+
+Question: {input}
+
+Your Answer:"""
+
+        # Check if user is asking to explain in their own words or simplify
+        rephrase_instructions = ""
+        if "in your own words" in user_message or "rephrase" in user_message or "simplify" in user_message or "explain simply" in user_message or "easier way" in user_message:
+            rephrase_instructions = "\n7. The user asked for a simpler explanation - use very plain language, everyday examples, and avoid technical jargon."
+        elif "elaborate" in user_message or "more details" in user_message or "explain more" in user_message:
+            rephrase_instructions = "\n7. The user wants more detail - provide a thorough explanation with additional examples and context."
+
+        prompt = ChatPromptTemplate.from_template(prompt_text)
+        
         document_chain = create_stuff_documents_chain(llm, prompt)
         
         response = document_chain.invoke({
             "input": request.message,
-            "context": context_docs
+            "context": context_docs,
+            "rephrase_instruction": rephrase_instructions
         })
 
         return {"text": response}
@@ -437,6 +750,78 @@ async def chat_response(request: ChatRequest):
     except Exception as e:
         print(f"Chat Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/paraphrase")
+async def paraphrase_text(request: ParaphraseRequest):
+    print(f"[DEBUG] Paraphrase request received. direct_model available: {direct_model is not None}")
+    
+    if not direct_model:
+        raise HTTPException(status_code=500, detail="Server misconfigured: GenAI client not initialized (Missing API Key?).")
+    
+    if not request.text or len(request.text.strip()) < 5:
+        raise HTTPException(status_code=400, detail="Text is too short to paraphrase.")
+    
+    try:
+        prompt = f"""You are an expert at rephrasing and rewording text. Your task is to completely rewrite the given text using DIFFERENT words and sentence structures while preserving the original meaning.
+
+IMPORTANT RULES:
+1. Use completely different words and phrases than the original
+2. Change the sentence structure and order when possible
+3. Do NOT copy any phrases verbatim - EVERY phrase must be rewritten
+4. Keep the same meaning but make it sound like a different person wrote it
+5. Output ONLY the paraphrased text, nothing else
+
+Text to paraphrase:
+{request.text}
+
+Rewritten (completely different words):"""
+        
+        print(f"[DEBUG] Calling AI model with text length: {len(request.text)}")
+        
+        try:
+            response = direct_model(
+                model=MODEL_NAME,
+                contents=prompt,
+                config={
+                    "max_output_tokens": 2000,
+                    "temperature": 0.8
+                }
+            )
+        except Exception as api_error:
+            error_str = str(api_error)
+            if "image" in error_str.lower():
+                raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
+            raise
+        
+        print(f"[DEBUG] Response received: {response}")
+        print(f"[DEBUG] Response type: {type(response)}")
+        
+        if response is None:
+            print("[ERROR] Response is None")
+            raise Exception("No response from AI")
+        
+        paraphrased_text = ""
+        if hasattr(response, 'text'):
+            paraphrased_text = response.text.strip() if response.text else ""
+        elif isinstance(response, dict) and 'text' in response:
+            paraphrased_text = response['text'].strip() if response.get('text') else ""
+        
+        print(f"[DEBUG] Extracted text: {paraphrased_text[:100] if paraphrased_text else 'EMPTY'}...")
+        
+        if not paraphrased_text:
+            raise Exception("Empty response from AI")
+            
+        return {"paraphrased": paraphrased_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Paraphrase Error: {e}")
+        import traceback
+        traceback.print_exc()
+        error_detail = str(e)
+        if "image" in error_detail.lower():
+            raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
+        raise HTTPException(status_code=500, detail=f"Failed to paraphrase text: {error_detail}")
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,64 +1,125 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { useAuth } from './AuthContext';
 import { StudyDocument, QuizResult, Quiz } from '../types';
+import { getUserDocuments, saveUserDocument, deleteUserDocument as apiDeleteDocument, updateDocumentSummary as apiUpdateSummary, getUserQuizResults, saveQuizResult, getDashboardStats, DashboardStats, UserDocument } from '../services/geminiService';
 
 interface AppContextType {
   documents: StudyDocument[];
   quizResults: QuizResult[];
-  addDocument: (doc: StudyDocument) => void;
-  addQuizResult: (result: QuizResult) => void;
+  dashboardStats: DashboardStats | null;
+  isLoading: boolean;
+  addDocument: (doc: StudyDocument) => Promise<void>;
+  addQuizResult: (result: { docId: string; docTitle: string; score: number; totalQuestions: number }) => Promise<void>;
   getDocument: (id: string) => StudyDocument | undefined;
-  updateDocumentSummary: (id: string, summary: string) => void;
+  updateDocumentSummary: (id: string, summary: string) => Promise<void>;
   addQuizToDocument: (docId: string, quiz: Quiz) => void;
-  deleteDocument: (id: string) => void;
+  deleteDocument: (id: string) => Promise<void>;
+  refreshDashboard: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-// Initial mock data
-const INITIAL_DOCS: StudyDocument[] = [
-  {
-    id: '1',
-    docId: 'mock-doc-id', // Added mock docId
-    title: 'Introduction to Mitosis',
-    content: `Mitosis is a part of the cell cycle when replicated chromosomes are separated into two new nuclei. Cell division gives rise to genetically identical cells in which the number of chromosomes is maintained. In general, mitosis (division of the nucleus) is preceded by the S stage of interphase (during which the DNA is replicated) and is often followed by telophase and cytokinesis; which divides the cytoplasm, organelles and cell membrane of one cell into two new cells containing roughly equal shares of these cellular components.`,
-    uploadDate: new Date().toISOString(),
-    quizzes: []
-  }
-];
-
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [documents, setDocuments] = useState<StudyDocument[]>(INITIAL_DOCS);
+  const { token, isAuthenticated } = useAuth();
+  const [documents, setDocuments] = useState<StudyDocument[]>([]);
   const [quizResults, setQuizResults] = useState<QuizResult[]>([]);
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Load from local storage on mount (simulated persistence)
-  useEffect(() => {
-    const savedDocs = localStorage.getItem('studyBuddy_docs');
-    const savedResults = localStorage.getItem('studyBuddy_results');
-    if (savedDocs) setDocuments(JSON.parse(savedDocs));
-    if (savedResults) setQuizResults(JSON.parse(savedResults));
-  }, []);
+  const fetchData = async () => {
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
 
-  // Save to local storage on change
-  useEffect(() => {
-    localStorage.setItem('studyBuddy_docs', JSON.stringify(documents));
-    localStorage.setItem('studyBuddy_results', JSON.stringify(quizResults));
-  }, [documents, quizResults]);
+    try {
+      setIsLoading(true);
+      const [docs, quizzes, stats] = await Promise.all([
+        getUserDocuments(token),
+        getUserQuizResults(token),
+        getDashboardStats(token)
+      ]);
 
-  const addDocument = (doc: StudyDocument) => {
-    setDocuments(prev => [doc, ...prev]);
+      const mappedDocs: StudyDocument[] = docs.map((d: UserDocument) => ({
+        id: d.id,
+        docId: d.doc_id,
+        title: d.title,
+        content: d.content,
+        uploadDate: d.created_at,
+        summary: d.summary || undefined,
+        quizzes: []
+      }));
+
+      setDocuments(mappedDocs);
+      
+      const mappedQuizzes: QuizResult[] = quizzes.map((q: any) => ({
+        id: q.id,
+        quizId: q.id,
+        score: q.score,
+        totalQuestions: q.total_questions,
+        date: q.created_at,
+        docTitle: q.doc_title
+      }));
+      setQuizResults(mappedQuizzes);
+      
+      setDashboardStats(stats);
+    } catch (error) {
+      console.error('Error fetching user data:', error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const deleteDocument = (id: string) => {
-    setDocuments(prev => prev.filter(d => d.id !== id));
+  useEffect(() => {
+    if (isAuthenticated && token) {
+      fetchData();
+    } else if (!isAuthenticated) {
+      setDocuments([]);
+      setQuizResults([]);
+      setDashboardStats(null);
+      setIsLoading(false);
+    }
+  }, [token, isAuthenticated]);
+
+  const addDocument = async (doc: StudyDocument) => {
+    if (!token) return;
+    
+    await saveUserDocument(token, {
+      title: doc.title,
+      content: doc.content,
+      docId: doc.docId,
+      summary: doc.summary
+    });
+    
+    await fetchData();
   };
 
-  const addQuizResult = (result: QuizResult) => {
-    setQuizResults(prev => [...prev, result]);
+  const addQuizResult = async (result: { docId: string; docTitle: string; score: number; totalQuestions: number }) => {
+    if (!token) return;
+    
+    await saveQuizResult(token, result);
+    
+    const stats = await getDashboardStats(token);
+    setDashboardStats(stats);
+    
+    const quizzes = await getUserQuizResults(token);
+    const mappedQuizzes: QuizResult[] = quizzes.map((q: any) => ({
+      id: q.id,
+      quizId: q.id,
+      score: q.score,
+      totalQuestions: q.total_questions,
+      date: q.created_at
+    }));
+    setQuizResults(mappedQuizzes);
   };
 
   const getDocument = (id: string) => documents.find(d => d.id === id);
 
-  const updateDocumentSummary = (id: string, summary: string) => {
+  const updateDocumentSummary = async (id: string, summary: string) => {
+    if (!token) return;
+    
+    await apiUpdateSummary(token, id, summary);
+    
     setDocuments(prev => prev.map(d => d.id === id ? { ...d, summary } : d));
   };
 
@@ -71,16 +132,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }));
   };
 
+  const deleteDocument = async (id: string) => {
+    if (!token) return;
+    
+    await apiDeleteDocument(token, id);
+    
+    setDocuments(prev => prev.filter(d => d.id !== id));
+  };
+
+  const refreshDashboard = async () => {
+    await fetchData();
+  };
+
   return (
     <AppContext.Provider value={{ 
       documents, 
-      quizResults, 
+      quizResults,
+      dashboardStats,
+      isLoading,
       addDocument, 
       addQuizResult, 
       getDocument,
       updateDocumentSummary,
       addQuizToDocument,
-      deleteDocument
+      deleteDocument,
+      refreshDashboard
     }}>
       {children}
     </AppContext.Provider>
