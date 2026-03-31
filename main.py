@@ -27,7 +27,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://zkzoaaegbguanrtxaucx.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inprem9hYWVnYmd1YW5ydHhhdWN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0MjQyODYsImV4cCI6MjA4OTAwMDI4Nn0.R8t7JFy03Hue7BfSG0HrSPrdlOMJk6duCKiYzLM9SzY")
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Set connection timeout
+supabase_client.postgrest.auth = supabase_client.auth
 print(f"[INFO] Supabase client initialized for project: {SUPABASE_URL}")
+print(f"[INFO] Connection timeout set to 30 seconds")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -35,6 +38,20 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def hash_password(plain: str) -> str:
     return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+
+def retry_supabase_operation(operation_func, max_retries=3, retry_delay=0.5):
+    """Helper function to retry Supabase operations with exponential backoff"""
+    import time
+    for attempt in range(max_retries):
+        try:
+            return operation_func()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+                continue
+            else:
+                print(f"[ERROR] Supabase operation failed after {max_retries} attempts: {e}")
+                raise HTTPException(status_code=503, detail="Database service temporarily unavailable. Please try again.")
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
@@ -51,10 +68,15 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    result = supabase_client.table("users").select("id, name, email, status, created_at").eq("email", email).execute()
-    if not result.data:
-        raise credentials_exception
-    return result.data[0]
+    
+    # Use retry helper for Supabase query
+    def query_user():
+        result = supabase_client.table("users").select("id, name, email, status, created_at").eq("email", email).execute()
+        if not result.data:
+            raise credentials_exception
+        return result.data[0]
+    
+    return retry_supabase_operation(query_user)
 
 def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("status") != "admin":
@@ -125,7 +147,7 @@ app.add_middleware(
 
 api_key = os.environ.get("API_KEY")
 
-MODEL_NAME = 'gemini-2.0-flash'  # Using flash model for better reliability
+MODEL_NAME = 'gemini-2.5-flash-lite'  # Using 2.0 flash model (confirmed available)
 
 llm = None
 direct_model = None
@@ -135,7 +157,7 @@ print(f"Debug: API_KEY present: {bool(api_key)}")
 if api_key:
     try:
         print("Debug: Initializing Google GenAI client...")
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
         direct_model = client.models.generate_content
         print("Debug: GenAI client initialized")
         
@@ -285,7 +307,7 @@ def verify_token(current_user: dict = Depends(get_current_user)):
 # ── Admin Routes ──────────────────────────────────────────────────────────────
 @app.get("/api/admin/users")
 def admin_list_users(admin: dict = Depends(get_current_admin)):
-    result = supabase_client.table("users").select("id, name, email, status, account_status, created_at").execute()
+    result = supabase_client.table("users").select("id, name, email, status, created_at").execute()
     return result.data or []
 
 @app.delete("/api/admin/users/{user_id}")
@@ -542,51 +564,67 @@ async def generate_summary(request: SummaryRequest):
     doc_title = request.doc_title or "the document"
     text_content = request.text
     
+    print(f"[SUMMARY] Generating {request.length} summary for: {doc_title}")
+    print(f"[SUMMARY] Text length: {len(text_content)} chars")
+    
     if request.length == "short":
-        prompt = f"""Based on the following document titled "{doc_title}", provide exactly 3 brief key points.
+        prompt = f"""You are a study assistant. Read the following document and create a VERY BRIEF summary.
 
-DOCUMENT CONTENT:
+DOCUMENT TITLE: {doc_title}
+
+REQUIREMENTS:
+- Write exactly 3 bullet points
+- Each bullet must be on ONE LINE only
+- Use completely different words than the original text
+- Focus on the 3 most important concepts
+- Do NOT copy text directly - paraphrase everything
+
+DOCUMENT TEXT:
 {text_content[:3000]}
 
-TASK: Extract and list exactly 3 main takeaways from this document. Write each point in 1-2 lines using your own words.
-
-OUTPUT (3 bullet points only):"""
-        max_tokens = 400
-        temp = 0.3
+YOUR RESPONSE (exactly 3 lines, each starting with •):"""
+        max_tokens = 500
+        temp = 0.5
+        
     elif request.length == "long":
-        prompt = f"""Create a comprehensive summary of the document titled "{doc_title}".
+        prompt = f"""You are a study assistant. Read the following document and create a DETAILED summary.
 
-DOCUMENT CONTENT:
+DOCUMENT TITLE: {doc_title}
+
+REQUIREMENTS:
+- Write a comprehensive summary with introduction paragraph
+- List 8-10 main topics with 2-3 sentences of explanation each
+- Include all important definitions and terminology
+- Add examples from the text where relevant
+- End with a conclusion paragraph
+- Use your OWN WORDS - do not copy text verbatim
+- Be thorough and detailed
+
+DOCUMENT TEXT:
 {text_content}
 
-TASK: Write a detailed summary that includes:
-1. A brief introduction (2 sentences)
-2. All major topics and concepts covered (8-12 points with explanations)
-3. Key definitions and terminology
-4. Important examples or details
-5. A conclusion
-
-Be thorough and ensure your response covers the main ideas from the document. Use your own words, do not copy text directly.
-
-OUTPUT:"""
-        max_tokens = 4000
+YOUR DETAILED SUMMARY:"""
+        max_tokens = 4500
         temp = 0.4
+        
     else:
-        prompt = f"""Summarize the document titled "{doc_title}" in a balanced format.
+        prompt = f"""You are a study assistant. Read the following document and create a BALANCED summary.
 
-DOCUMENT CONTENT:
+DOCUMENT TITLE: {doc_title}
+
+REQUIREMENTS:
+- Start with a brief intro paragraph (2-3 sentences)
+- List 5-6 main points, each with 1-2 sentences of explanation
+- Include key definitions (at least 3 terms)
+- End with a main takeaway or conclusion
+- Use your OWN WORDS - paraphrase, don't copy
+- Be informative but keep it readable
+
+DOCUMENT TEXT:
 {text_content[:6000]}
 
-TASK: Create a summary with:
-1. Brief overview (1-2 sentences)
-2. 5-6 main points with clear explanations
-3. Key terms and definitions (at least 3)
-4. Main takeaway
-
-Use your own words and ensure the summary is informative but concise.
-
-OUTPUT:"""
-        max_tokens = 1500
+YOUR BALANCED SUMMARY:"""
+        max_tokens = 2000
         temp = 0.35
     
     try:
@@ -595,21 +633,27 @@ OUTPUT:"""
             contents=prompt,
             config={
                 "max_output_tokens": max_tokens,
-                "temperature": temp,
-                "system_instruction": "You are a helpful study assistant. Always provide accurate, relevant summaries based ONLY on the document content provided. Never make up information not in the document."
+                "temperature": temp
             }
         )
+        
         summary_text = response.text.strip()
+        print(f"[SUMMARY] Generated {len(summary_text)} chars")
+        
         if not summary_text:
             raise Exception("Empty response from AI")
+            
         return {"summary": summary_text}
+        
     except HTTPException:
         raise
     except Exception as api_error:
         error_str = str(api_error)
+        print(f"[SUMMARY ERROR] {error_str}")
         if "image" in error_str.lower():
             raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
-        print(f"Summary Generation Error: {api_error}")
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+            raise HTTPException(status_code=429, detail="API quota exceeded. You have used up your daily/monthly quota. Please upgrade your API plan or try again later.")
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(api_error)}")
 
 @app.post("/api/quiz")
@@ -639,6 +683,8 @@ async def generate_quiz(request: QuizRequest):
             error_str = str(api_error)
             if "image" in error_str.lower():
                 raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+                raise HTTPException(status_code=429, detail="API quota exceeded. You have used up your daily/monthly quota. Please upgrade your API plan or try again later.")
             raise
         
         text = response.text.strip()

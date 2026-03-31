@@ -3,12 +3,12 @@ import {
   Users, Trash2, KeyRound, ShieldCheck, ShieldOff,
   AlertCircle, Loader, Search, RefreshCw, X, Eye, EyeOff, CheckCircle,
   FileText, Brain, ChevronLeft, ChevronRight, Activity,
-  Ban, CheckCircle2, XCircle, Mail, Calendar, Clock, FileDown,
+  Mail, Calendar, Clock, FileDown,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
   adminListUsers, adminDeleteUser, adminChangePassword, adminChangeRole,
-  adminToggleUserStatus, adminGetUserDetails, AdminUser,
+  adminGetUserDetails, AdminUser,
 } from '../services/geminiService';
 
 const ITEMS_PER_PAGE = 10;
@@ -27,17 +27,6 @@ const RoleBadge: React.FC<{ status: 'user' | 'admin' }> = ({ status }) =>
   ) : (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-600/60 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 text-xs font-semibold">
       <ShieldOff className="w-3 h-3" /> User
-    </span>
-  );
-
-const StatusBadge: React.FC<{ status: 'active' | 'inactive' }> = ({ status }) =>
-  status === 'active' ? (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-      <CheckCircle2 className="w-3 h-3" /> Active
-    </span>
-  ) : (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-500/20 border border-red-300 dark:border-red-500/40 text-red-700 dark:text-red-300 text-xs font-medium">
-      <XCircle className="w-3 h-3" /> Inactive
     </span>
   );
 
@@ -237,12 +226,6 @@ const UserDetailModal: React.FC<UserDetailModalProps> = ({ user, onClose }) => {
                   </div>
                   <RoleBadge status={user.status} />
                 </div>
-                <div className="bg-slate-50 dark:bg-slate-900 rounded-xl p-4">
-                  <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs mb-2">
-                    <Activity className="w-4 h-4" /> Status
-                  </div>
-                  <StatusBadge status={(details as any)?.status || 'active'} />
-                </div>
               </div>
 
               <div>
@@ -321,7 +304,6 @@ const UserManagement: React.FC = () => {
   const [filtered, setFiltered] = useState<AdminUser[]>([]);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'admin' | 'user'>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [isLoadingList, setIsLoadingList] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -368,10 +350,9 @@ const UserManagement: React.FC = () => {
       result = result.filter(u => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
     }
     if (roleFilter !== 'all') result = result.filter(u => u.status === roleFilter);
-    if (statusFilter !== 'all') result = result.filter(u => (u.account_status || 'active') === statusFilter);
     setFiltered(result);
     setCurrentPage(1);
-  }, [search, roleFilter, statusFilter, users]);
+  }, [search, roleFilter, users]);
 
   const totalPages = Math.ceil(filtered.length / ITEMS_PER_PAGE);
   const paginatedUsers = filtered.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
@@ -420,23 +401,9 @@ const UserManagement: React.FC = () => {
     }
   };
 
-  const handleStatusToggle = async (target: AdminUser) => {
-    if (!token) return;
-    const currentStatus = target.account_status || 'active';
-    const newStatus = currentStatus === 'active' ? 'inactive' : 'active';
-    try {
-      await adminToggleUserStatus(token, target.id, newStatus);
-      setUsers(prev => prev.map(u => u.id === target.id ? { ...u, account_status: newStatus } : u));
-      logAction(newStatus === 'inactive' ? 'DEACTIVATE_USER' : 'ACTIVATE_USER', `${newStatus === 'inactive' ? 'Deactivated' : 'Activated'} user: ${target.name}`);
-      showToast(`${target.name} has been ${newStatus === 'inactive' ? 'deactivated' : 'activated'}.`);
-    } catch (e: any) {
-      showToast(e.message || 'Status change failed.', 'error');
-    }
-  };
-
   const handleExportCSV = () => {
-    const headers = ['ID', 'Name', 'Email', 'Role', 'Account Status', 'Created'];
-    const rows = filtered.map(u => [u.id, u.name, u.email, u.status, u.account_status || 'active', u.created_at]);
+    const headers = ['ID', 'Name', 'Email', 'Role', 'Created'];
+    const rows = filtered.map(u => [u.id, u.name, u.email, u.status, u.created_at]);
     const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -453,8 +420,6 @@ const UserManagement: React.FC = () => {
     total: users.length,
     admins: users.filter(u => u.status === 'admin').length,
     regularUsers: users.filter(u => u.status === 'user').length,
-    active: users.filter(u => u.account_status === 'active').length,
-    inactive: users.filter(u => u.account_status === 'inactive').length,
   };
 
   return (
@@ -469,13 +434,11 @@ const UserManagement: React.FC = () => {
         <p className="text-slate-500 dark:text-slate-400">Manage all registered users — change roles, reset passwords, or remove accounts.</p>
       </header>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-4 mb-8">
         {[
           { label: 'Total Users', value: stats.total, color: 'text-blue-600 dark:text-blue-400', bg: 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/20' },
           { label: 'Admins', value: stats.admins, color: 'text-purple-600 dark:text-purple-400', bg: 'bg-purple-50 dark:bg-purple-500/10 border-purple-200 dark:border-purple-500/20' },
           { label: 'Students', value: stats.regularUsers, color: 'text-emerald-600 dark:text-emerald-400', bg: 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' },
-          { label: 'Active', value: stats.active, color: 'text-green-600 dark:text-green-400', bg: 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/20' },
-          { label: 'Inactive', value: stats.inactive, color: 'text-red-600 dark:text-red-400', bg: 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20' },
         ].map(s => (
           <div key={s.label} className={`rounded-xl border p-4 ${s.bg}`}>
             <p className="text-slate-500 dark:text-slate-400 text-xs font-medium uppercase mb-1">{s.label}</p>
@@ -503,15 +466,6 @@ const UserManagement: React.FC = () => {
           <option value="all">All Roles</option>
           <option value="admin">Admins</option>
           <option value="user">Users</option>
-        </select>
-        <select
-          value={statusFilter}
-          onChange={e => setStatusFilter(e.target.value as any)}
-          className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-2.5 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        >
-          <option value="all">All Status</option>
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
         </select>
         <button onClick={fetchUsers} className="flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors text-sm">
           <RefreshCw className="w-4 h-4" /> Refresh
@@ -543,7 +497,6 @@ const UserManagement: React.FC = () => {
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
                     <th className="text-left px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase">User</th>
-                    <th className="text-left px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase hidden lg:table-cell">Status</th>
                     <th className="text-left px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase">Role</th>
                     <th className="text-left px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase hidden md:table-cell">Joined</th>
                     <th className="text-right px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase">Actions</th>
@@ -568,9 +521,6 @@ const UserManagement: React.FC = () => {
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 hidden lg:table-cell">
-                          <StatusBadge status={u.account_status || 'active'} />
-                        </td>
                         <td className="px-6 py-4"><RoleBadge status={u.status} /></td>
                         <td className="px-6 py-4 text-slate-500 dark:text-slate-400 hidden md:table-cell">
                           {new Date(u.created_at).toLocaleDateString()}
@@ -579,14 +529,6 @@ const UserManagement: React.FC = () => {
                           <div className="flex items-center justify-end gap-1.5 flex-wrap">
                             <button onClick={() => setDetailTarget(u)} title="View Details" className="p-2 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-400 transition-colors">
                               <Eye className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => !isSelf && handleStatusToggle(u)}
-                              disabled={isSelf}
-                              title={isSelf ? 'Cannot deactivate yourself' : 'Toggle Status'}
-                              className={`p-2 rounded-lg transition-colors ${isSelf ? 'opacity-30 cursor-not-allowed bg-slate-200 dark:bg-slate-700 text-slate-400' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-400'}`}
-                            >
-                              {u.account_status === 'inactive' ? <CheckCircle className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
                             </button>
                             <button
                               onClick={() => !isSelf && handleRoleToggle(u)}
