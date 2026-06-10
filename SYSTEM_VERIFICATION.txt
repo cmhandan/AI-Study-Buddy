@@ -12,7 +12,7 @@
    ✅ Main module imports successfully
    ✅ All Python dependencies installed
    ✅ Environment variables loaded correctly
-   ✅ API_KEY configured: AIzaSyA4ID13HGy00Af39pMqbFik5AdpjQnbTDY
+   ✅ API_KEY configured: xxxxx
    ✅ Google GenAI client initialized
    ✅ LangChain initialized
    ✅ Supabase database connected
