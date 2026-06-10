@@ -156,7 +156,7 @@ $ .\START_HERE.ps1
 
 🔧 ENVIRONMENT CONFIGURATION:
 
-✓ API_KEY = AIzaSyA4ID13HGy00Af39pMqbFik5AdpjQnbTDY
+✓ API_KEY = xxxx
 ✓ VITE_API_URL = http://localhost:8001/api
 ✓ SUPABASE_URL = https://zkzoaaegbguanrtxaucx.supabase.co
 ✓ SUPABASE_KEY = (configured)
