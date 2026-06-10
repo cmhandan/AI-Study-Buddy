@@ -24,12 +24,20 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 # ── Supabase Setup ────────────────────────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://zkzoaaegbguanrtxaucx.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inprem9hYWVnYmd1YW5ydHhhdWN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0MjQyODYsImV4cCI6MjA4OTAwMDI4Nn0.R8t7JFy03Hue7BfSG0HrSPrdlOMJk6duCKiYzLM9SzY")
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-# Set connection timeout
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://clnpiqxtfpykdcantjvi.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbnBpcXh0ZnB5a2RjYW50anZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxNTA2OTgsImV4cCI6MjA4ODcyNjY5OH0.cFOaFys9iLE-VxwzlYqSIqYjVSlBiqSPwWvNqxXu6_0")
+# Optional: prefer the service role key for server-side operations so RLS doesn't block server calls.
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+if SUPABASE_SERVICE_ROLE_KEY:
+    supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    print(f"[INFO] Supabase client initialized for project: {SUPABASE_URL} using SERVICE_ROLE key")
+else:
+    supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print(f"[WARN] Supabase client initialized for project: {SUPABASE_URL} using anon/regular key.\n[WARN] If you use custom JWTs or RLS, SELECT queries may return no rows. Consider setting SUPABASE_SERVICE_ROLE_KEY in the environment for server operations.")
+
+# Set connection timeout/auth helper
 supabase_client.postgrest.auth = supabase_client.auth
-print(f"[INFO] Supabase client initialized for project: {SUPABASE_URL}")
 print(f"[INFO] Connection timeout set to 30 seconds")
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -75,7 +83,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         if not result.data:
             raise credentials_exception
         return result.data[0]
-    
+
     return retry_supabase_operation(query_user)
 
 def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
@@ -160,7 +168,7 @@ if api_key:
         client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
         direct_model = client.models.generate_content
         print("Debug: GenAI client initialized")
-        
+
         print("Debug: Initializing LangChain...")
         llm = ChatGoogleGenerativeAI(model=MODEL_NAME, google_api_key=api_key)
         print("[SUCCESS] AI Clients initialized successfully.")
@@ -222,18 +230,18 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 def process_and_store_document(text: str) -> str:
     """Splits document text into chunks and stores them in memory AND disk."""
     doc_id = str(uuid.uuid4())
-    
+
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=5000,
         chunk_overlap=200
     )
     chunks = text_splitter.split_text(text)
-    
+
     if not chunks:
         raise HTTPException(status_code=400, detail="Document is empty or could not be split.")
 
     document_chunks[doc_id] = chunks
-    
+
     try:
         file_path = os.path.join(STORAGE_DIR, f"{doc_id}.json")
         with open(file_path, "w", encoding="utf-8") as f:
@@ -247,7 +255,7 @@ def process_and_store_document(text: str) -> str:
 def create_stuff_documents_chain(llm, prompt):
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
-    
+
     return (
         RunnablePassthrough.assign(context=lambda x: format_docs(x["context"]))
         | prompt
@@ -356,12 +364,12 @@ def admin_get_user_details(user_id: str, admin: dict = Depends(get_current_admin
     user_result = supabase_client.table("users").select("*").eq("id", user_id).execute()
     if not user_result.data:
         raise HTTPException(status_code=404, detail="User not found.")
-    
+
     user = user_result.data[0]
-    
+
     docs_result = supabase_client.table("documents").select("id, title, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
     quizzes_result = supabase_client.table("quiz_results").select("id, score, total_questions, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
-    
+
     activities = []
     for doc in docs_result.data or []:
         activities.append({
@@ -374,7 +382,7 @@ def admin_get_user_details(user_id: str, admin: dict = Depends(get_current_admin
             "timestamp": quiz["created_at"]
         })
     activities.sort(key=lambda x: x["timestamp"], reverse=True)
-    
+
     return {
         "user": user,
         "documents": docs_result.data or [],
@@ -388,13 +396,13 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
     filename = file.filename
     extension = filename.split(".")[-1].lower() if "." in filename else ""
     content = ""
-    
+
     image_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tiff", "heic"]
     if extension in image_extensions:
         raise HTTPException(status_code=400, detail="Image files are not supported. Please upload a PDF, DOCX, or TXT file.")
-    
+
     file_bytes = await file.read()
-    
+
     if extension == "pdf":
         content = extract_text_from_pdf(file_bytes)
     elif extension in ["docx", "doc"]:
@@ -411,7 +419,7 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
          raise HTTPException(status_code=400, detail="The document appears to be empty.")
 
     doc_id = process_and_store_document(content)
-    
+
     # Save to database
     db_doc_id = str(uuid.uuid4())
     new_doc = {
@@ -424,9 +432,20 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
         "created_at": datetime.utcnow().isoformat()
     }
     try:
-        supabase_client.table("documents").insert(new_doc).execute()
+        result = supabase_client.table("documents").insert(new_doc).execute()
+        # Postgrest client returns .data on success, .error on failure
+        if getattr(result, "error", None):
+            print(f"Error saving document (postgrest error): {result.error}")
+        if not getattr(result, "data", None):
+            # Surface the error to the client so it's visible during upload
+            err_msg = getattr(result, "error", None) or "Unknown error saving document"
+            print(f"Failed to save document to DB: {err_msg}")
+            raise HTTPException(status_code=500, detail=f"Failed to save document to DB: {err_msg}")
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error saving document: {e}")
+        print(f"Exception when saving document: {e}")
+        raise HTTPException(status_code=500, detail=f"Exception when saving document: {e}")
 
     return {
         "title": filename,
@@ -520,30 +539,30 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
     # Get document count
     docs_result = supabase_client.table("documents").select("id", count="exact").eq("user_id", current_user["id"]).execute()
     doc_count = docs_result.count if docs_result.count is not None else 0
-    
+
     # Get quiz results
     quiz_result = supabase_client.table("quiz_results").select("*").eq("user_id", current_user["id"]).execute()
     quiz_results = quiz_result.data or []
     quiz_count = len(quiz_results)
-    
+
     # Calculate average score
     avg_score = 0
     if quiz_count > 0:
         total_percentage = sum((q["score"] / q["total_questions"]) * 100 for q in quiz_results)
         avg_score = round(total_percentage / quiz_count)
-    
+
     # Get study time
     sessions_result = supabase_client.table("study_sessions").select("duration_minutes").eq("user_id", current_user["id"]).execute()
     sessions = sessions_result.data or []
     total_study_minutes = sum(s["duration_minutes"] for s in sessions)
-    
+
     # Get recent quiz results (last 5)
     recent_quizzes = quiz_results[:5]
-    
+
     # Get recent documents
     docs_list = supabase_client.table("documents").select("id, title, created_at").eq("user_id", current_user["id"]).order("created_at", desc=True).limit(4).execute()
     recent_docs = docs_list.data or []
-    
+
     return {
         "documentCount": doc_count,
         "quizCount": quiz_count,
@@ -557,16 +576,16 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
 async def generate_summary(request: SummaryRequest):
     if not direct_model:
         raise HTTPException(status_code=500, detail="Server misconfigured: GenAI client not initialized (Missing API Key?).")
-    
+
     if not request.text or len(request.text.strip()) < 10:
         raise HTTPException(status_code=400, detail="Document content is too short to summarize.")
-    
+
     doc_title = request.doc_title or "the document"
     text_content = request.text
-    
+
     print(f"[SUMMARY] Generating {request.length} summary for: {doc_title}")
     print(f"[SUMMARY] Text length: {len(text_content)} chars")
-    
+
     if request.length == "short":
         prompt = f"""You are a study assistant. Read the following document and create a VERY BRIEF summary.
 
@@ -585,7 +604,7 @@ DOCUMENT TEXT:
 YOUR RESPONSE (exactly 3 lines, each starting with •):"""
         max_tokens = 500
         temp = 0.5
-        
+
     elif request.length == "long":
         prompt = f"""You are a study assistant. Read the following document and create a DETAILED summary.
 
@@ -606,7 +625,7 @@ DOCUMENT TEXT:
 YOUR DETAILED SUMMARY:"""
         max_tokens = 4500
         temp = 0.4
-        
+
     else:
         prompt = f"""You are a study assistant. Read the following document and create a BALANCED summary.
 
@@ -626,7 +645,7 @@ DOCUMENT TEXT:
 YOUR BALANCED SUMMARY:"""
         max_tokens = 2000
         temp = 0.35
-    
+
     try:
         response = direct_model(
             model=MODEL_NAME,
@@ -636,15 +655,15 @@ YOUR BALANCED SUMMARY:"""
                 "temperature": temp
             }
         )
-        
+
         summary_text = response.text.strip()
         print(f"[SUMMARY] Generated {len(summary_text)} chars")
-        
+
         if not summary_text:
             raise Exception("Empty response from AI")
-            
+
         return {"summary": summary_text}
-        
+
     except HTTPException:
         raise
     except Exception as api_error:
@@ -662,14 +681,14 @@ async def generate_quiz(request: QuizRequest):
         raise HTTPException(status_code=500, detail="Server misconfigured: GenAI client not initialized (Missing API Key?).")
 
     try:
-        system_instruction = """You are a strict quiz generator. 
+        system_instruction = """You are a strict quiz generator.
         Create exactly the requested number of questions.
         Return a JSON ARRAY of objects. Do not wrap it in a root object like "questions".
         Each object must have: "question", "options" (array of strings), "correctAnswerIndex" (0-based integer).
         Return ONLY valid JSON."""
-        
+
         prompt = f"{system_instruction}\n\nGenerate a multiple-choice quiz with {request.num_questions} questions based on the following text:\n\n{request.text}"
-        
+
         try:
             response = direct_model(
                 model=MODEL_NAME,
@@ -686,15 +705,15 @@ async def generate_quiz(request: QuizRequest):
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
                 raise HTTPException(status_code=429, detail="API quota exceeded. You have used up your daily/monthly quota. Please upgrade your API plan or try again later.")
             raise
-        
+
         text = response.text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
             if text.endswith("```"):
                 text = text.rsplit("\n", 1)[0]
-                
+
         data = json.loads(text)
-        
+
         if isinstance(data, dict):
             if "questions" in data and isinstance(data["questions"], list):
                 data = data["questions"]
@@ -705,10 +724,10 @@ async def generate_quiz(request: QuizRequest):
                     if isinstance(value, list):
                         data = value
                         break
-        
+
         if not isinstance(data, list):
             raise ValueError("AI did not return a list of questions.")
-            
+
         return data
     except HTTPException:
         raise
@@ -730,31 +749,31 @@ async def chat_response(request: ChatRequest):
                 print(f"Debug: Restored document {request.docId} from disk.")
             except Exception as e:
                 print(f"Error loading document from disk: {e}")
-        
+
     if request.docId not in document_chunks:
         raise HTTPException(status_code=404, detail="Document not found in memory. It might have been cleared. Please re-upload.")
 
     try:
         chunks = document_chunks[request.docId]
         context_docs = [Document(page_content=chunk) for chunk in chunks]
-        
+
         user_message = request.message.lower().strip()
-        
+
         # Handle greetings
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', "what's up", 'wassup']
         if any(g == user_message or user_message.startswith(g + ' ') or user_message.startswith(g + ',') for g in greetings):
             return {"text": "Hello! I'm your study assistant. Feel free to ask me any questions about the document you're reading, and I'll help you understand the content better."}
-        
+
         # Handle thank you messages
         thanks = ['thank you', 'thanks', 'thank you so much', 'thanks a lot', 'appreciate it', 'thx']
         if any(t in user_message for t in thanks):
             return {"text": "You're welcome! I'm happy to help. Feel free to ask more questions if you need anything else."}
-        
+
         # Handle goodbye messages
         goodbye = ['bye', 'goodbye', 'see you', 'talk to you later', 'thanks for helping']
         if any(g in user_message for g in goodbye):
             return {"text": "Goodbye! Good luck with your studies. Feel free to come back anytime if you need help!"}
-        
+
         # Build the prompt - with paraphrasing, no verbatim copying, and polite fallbacks
         prompt_text = """You are a helpful AI Study Assistant. Your role is to help students understand their study materials better.
 
@@ -782,9 +801,9 @@ Your Answer:"""
             rephrase_instructions = "\n7. The user wants more detail - provide a thorough explanation with additional examples and context."
 
         prompt = ChatPromptTemplate.from_template(prompt_text)
-        
+
         document_chain = create_stuff_documents_chain(llm, prompt)
-        
+
         response = document_chain.invoke({
             "input": request.message,
             "context": context_docs,
@@ -800,13 +819,13 @@ Your Answer:"""
 @app.post("/api/paraphrase")
 async def paraphrase_text(request: ParaphraseRequest):
     print(f"[DEBUG] Paraphrase request received. direct_model available: {direct_model is not None}")
-    
+
     if not direct_model:
         raise HTTPException(status_code=500, detail="Server misconfigured: GenAI client not initialized (Missing API Key?).")
-    
+
     if not request.text or len(request.text.strip()) < 5:
         raise HTTPException(status_code=400, detail="Text is too short to paraphrase.")
-    
+
     try:
         prompt = f"""You are an expert at rephrasing and rewording text. Your task is to completely rewrite the given text using DIFFERENT words and sentence structures while preserving the original meaning.
 
@@ -821,9 +840,9 @@ Text to paraphrase:
 {request.text}
 
 Rewritten (completely different words):"""
-        
+
         print(f"[DEBUG] Calling AI model with text length: {len(request.text)}")
-        
+
         try:
             response = direct_model(
                 model=MODEL_NAME,
@@ -838,25 +857,25 @@ Rewritten (completely different words):"""
             if "image" in error_str.lower():
                 raise HTTPException(status_code=400, detail="Image files are not supported. Please provide text content only.")
             raise
-        
+
         print(f"[DEBUG] Response received: {response}")
         print(f"[DEBUG] Response type: {type(response)}")
-        
+
         if response is None:
             print("[ERROR] Response is None")
             raise Exception("No response from AI")
-        
+
         paraphrased_text = ""
         if hasattr(response, 'text'):
             paraphrased_text = response.text.strip() if response.text else ""
         elif isinstance(response, dict) and 'text' in response:
             paraphrased_text = response['text'].strip() if response.get('text') else ""
-        
+
         print(f"[DEBUG] Extracted text: {paraphrased_text[:100] if paraphrased_text else 'EMPTY'}...")
-        
+
         if not paraphrased_text:
             raise Exception("Empty response from AI")
-            
+
         return {"paraphrased": paraphrased_text}
     except HTTPException:
         raise

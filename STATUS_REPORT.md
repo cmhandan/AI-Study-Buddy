@@ -9,7 +9,7 @@
 
 ### Backend (Python/FastAPI)
 - ✅ FastAPI Server: **Ready**
-- ✅ API_KEY (Google Gemini): **Configured** (`AIzaSyA4ID13HGy00Af39pMqbFik5AdpjQnbTDY`)
+- ✅ API_KEY (Google Gemini): **Configured** (``)
 - ✅ GenAI Client: **Initialized**
 - ✅ LangChain: **Initialized**
 - ✅ Supabase Database: **Connected**
